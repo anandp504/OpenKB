@@ -39,6 +39,19 @@ warnings.filterwarnings("ignore")
 load_dotenv()  # load from cwd (covers running inside the KB dir)
 
 
+def _echo_llm_config(model: str) -> None:
+    """Print the resolved LLM model and endpoint to stdout once per invocation."""
+    parts = [f"LLM: {model}"]
+    for env_var, label in (
+        ("OLLAMA_API_BASE", "ollama"),
+        ("OPENAI_API_BASE", "base_url"),
+    ):
+        val = os.environ.get(env_var, "")
+        if val:
+            parts.append(f"{label}={val}")
+    click.echo(" | ".join(parts))
+
+
 def _setup_llm_key(kb_dir: Path | None = None) -> None:
     """Set LiteLLM API key from LLM_API_KEY env var if present.
 
@@ -152,6 +165,8 @@ def add_single_file(file_path: Path, kb_dir: Path) -> None:
     model: str = config.get("model", DEFAULT_CONFIG["model"])
     registry = HashRegistry(openkb_dir / "hashes.json")
 
+    _echo_llm_config(model)
+
     # 2. Convert document
     click.echo(f"Adding: {file_path.name}")
     try:
@@ -238,6 +253,8 @@ async def add_single_file_async(
     config = load_config(openkb_dir / "config.yaml")
     _setup_llm_key(kb_dir)
     model: str = config.get("model", DEFAULT_CONFIG["model"])
+
+    _echo_llm_config(model)
 
     async def _echo(msg: str) -> None:
         if batch_state is not None:
