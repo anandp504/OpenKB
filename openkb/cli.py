@@ -28,7 +28,9 @@ from dotenv import load_dotenv
 from openkb.config import DEFAULT_CONFIG, load_config, save_config, load_global_config, register_kb
 from openkb.converter import convert_document
 from openkb.log import append_log
-from openkb.schema import AGENTS_MD
+from openkb.schema import AGENTS_MD, get_agents_md
+from openkb.batch_state import BatchState
+from openkb.state import HashRegistry
 
 # Suppress warnings after all imports — markitdown overrides filters at import time
 import warnings
@@ -214,6 +216,175 @@ def add_single_file(file_path: Path, kb_dir: Path) -> None:
     click.echo(f"  [OK] {file_path.name} added to knowledge base.")
 
 
+async def add_single_file_async(
+    file_path: Path,
+    kb_dir: Path,
+    batch_state: "BatchState | None" = None,
+) -> None:
+    """Async version of add_single_file for use in batch processing.
+
+    When batch_state is provided, uses shared locks and semaphore for
+    safe concurrent execution. Hash registration is deferred to the
+    caller (batch end flush). When batch_state is None, falls back to
+    the same behaviour as the synchronous version.
+    """
+    from openkb.agent.compiler import compile_long_doc, compile_short_doc
+
+    logger = logging.getLogger(__name__)
+    openkb_dir = kb_dir / ".openkb"
+    config = load_config(openkb_dir / "config.yaml")
+    _setup_llm_key(kb_dir)
+    model: str = config.get("model", DEFAULT_CONFIG["model"])
+
+    async def _echo(msg: str) -> None:
+        if batch_state is not None:
+            async with batch_state.print_lock:
+                click.echo(msg)
+        else:
+            click.echo(msg)
+
+    async def _log(action: str, detail: str) -> None:
+        if batch_state is not None:
+            async with batch_state.log_lock:
+                append_log(kb_dir / "wiki", action, detail)
+        else:
+            append_log(kb_dir / "wiki", action, detail)
+
+    async with batch_state.batch_semaphore if batch_state is not None else _null_cm():
+        # 2. Convert document (blocking I/O — offload to thread pool)
+        await _echo(f"Adding: {file_path.name}")
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(None, convert_document, file_path, kb_dir)
+        except Exception as exc:
+            await _echo(f"  [ERROR] Conversion failed: {exc}")
+            logger.debug("Conversion traceback:", exc_info=True)
+            return
+
+        if result.skipped:
+            await _echo(f"  [SKIP] Already in knowledge base: {file_path.name}")
+            return
+
+        doc_name = file_path.stem
+
+        # 3/4. Index and compile
+        if result.is_long_doc:
+            await _echo(f"  Long document detected — indexing with PageIndex...")
+            try:
+                from openkb.indexer import index_long_document
+                index_result = await loop.run_in_executor(
+                    None, index_long_document, result.raw_path, kb_dir
+                )
+            except Exception as exc:
+                await _echo(f"  [ERROR] Indexing failed: {exc}")
+                logger.debug("Indexing traceback:", exc_info=True)
+                return
+
+            summary_path = kb_dir / "wiki" / "summaries" / f"{doc_name}.md"
+            await _echo(f"  Compiling long doc (doc_id={index_result.doc_id})...")
+            for attempt in range(2):
+                try:
+                    await compile_long_doc(
+                        doc_name, summary_path, index_result.doc_id, kb_dir, model,
+                        doc_description=index_result.description,
+                        batch_state=batch_state,
+                    )
+                    break
+                except Exception as exc:
+                    if attempt == 0:
+                        await _echo(f"  Retrying compilation in 2s...")
+                        await asyncio.sleep(2)
+                    else:
+                        await _echo(f"  [ERROR] Compilation failed: {exc}")
+                        logger.debug("Compilation traceback:", exc_info=True)
+                        return
+        else:
+            await _echo(f"  Compiling short doc...")
+            for attempt in range(2):
+                try:
+                    await compile_short_doc(
+                        doc_name, result.source_path, kb_dir, model,
+                        batch_state=batch_state,
+                    )
+                    break
+                except Exception as exc:
+                    if attempt == 0:
+                        await _echo(f"  Retrying compilation in 2s...")
+                        await asyncio.sleep(2)
+                    else:
+                        await _echo(f"  [ERROR] Compilation failed: {exc}")
+                        logger.debug("Compilation traceback:", exc_info=True)
+                        return
+
+        # Register hash after successful compilation
+        if result.file_hash:
+            doc_type = "long_pdf" if result.is_long_doc else file_path.suffix.lstrip(".")
+            metadata = {"name": file_path.name, "type": doc_type}
+            if batch_state is not None:
+                async with batch_state.hashes_lock:
+                    batch_state.pending_hashes.append((result.file_hash, metadata))
+            else:
+                registry = HashRegistry(openkb_dir / "hashes.json")
+                registry.add(result.file_hash, metadata)
+
+        await _log("ingest", file_path.name)
+        await _echo(f"  [OK] {file_path.name} added to knowledge base.")
+
+
+class _null_cm:
+    """A no-op async context manager used as a placeholder."""
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, *args):
+        pass
+
+
+async def _run_batch_async(files: list[Path], kb_dir: Path) -> None:
+    """Run batch document processing in a single asyncio event loop."""
+    from openkb.agent.compiler import _read_concept_briefs_as_dict, _SYSTEM_TEMPLATE
+
+    openkb_dir = kb_dir / ".openkb"
+    config = load_config(openkb_dir / "config.yaml")
+    model: str = config.get("model", DEFAULT_CONFIG["model"])
+    language: str = config.get("language", DEFAULT_CONFIG.get("language", "en"))
+    batch_concurrency: int = config.get(
+        "batch_concurrency", DEFAULT_CONFIG.get("batch_concurrency", 3)
+    )
+
+    wiki_dir = kb_dir / "wiki"
+
+    # Read concept briefs from disk ONCE — shared in-memory during batch
+    raw_briefs = _read_concept_briefs_as_dict(wiki_dir)
+
+    # Build system_msg ONCE — reused by all docs
+    schema_md = get_agents_md(wiki_dir)
+    system_msg = {"role": "system", "content": _SYSTEM_TEMPLATE.format(
+        schema_md=schema_md, language=language,
+    )}
+
+    batch_state = BatchState(raw_briefs, system_msg, batch_concurrency)
+
+    click.echo(f"Batch processing {len(files)} files (concurrency={batch_concurrency})...")
+
+    results = await asyncio.gather(
+        *[add_single_file_async(f, kb_dir, batch_state) for f in files],
+        return_exceptions=True,
+    )
+
+    # Log any unexpected errors
+    for f, result in zip(files, results):
+        if isinstance(result, Exception):
+            click.echo(f"  [ERROR] {f.name}: {result}")
+
+    # Flush accumulated hashes to disk ONCE for the whole batch
+    if batch_state.pending_hashes:
+        registry = HashRegistry(openkb_dir / "hashes.json")
+        async with batch_state.hashes_lock:
+            for h, meta in batch_state.pending_hashes:
+                registry._data[h] = meta
+            registry._persist()
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -344,9 +515,10 @@ def add(ctx, path):
             return
         total = len(files)
         click.echo(f"Found {total} supported file(s) in {path}.")
-        for i, f in enumerate(files, 1):
-            click.echo(f"\n[{i}/{total}] ", nl=False)
-            add_single_file(f, kb_dir)
+        if total == 1:
+            add_single_file(files[0], kb_dir)
+        else:
+            asyncio.run(_run_batch_async(files, kb_dir))
     else:
         if target.suffix.lower() not in SUPPORTED_EXTENSIONS:
             click.echo(

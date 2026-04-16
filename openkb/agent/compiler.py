@@ -22,6 +22,7 @@ from pathlib import Path
 import litellm
 
 from openkb.schema import get_agents_md
+from openkb.batch_state import BatchState
 
 logger = logging.getLogger(__name__)
 
@@ -277,11 +278,35 @@ def _read_concept_briefs(wiki_dir: Path) -> str:
                         brief = line[len("brief:"):].strip()
                         break
         if not brief:
-            brief = body.strip().replace("\n", " ")[:150]
+            brief = body.strip().replace("\n", " ")[:80]
         if brief:
             lines.append(f"- {path.stem}: {brief}")
 
     return "\n".join(lines) or "(none yet)"
+
+
+def _read_concept_briefs_as_dict(wiki_dir: Path) -> dict[str, str]:
+    """Like _read_concept_briefs but returns slug->brief dict for BatchState."""
+    concepts_dir = wiki_dir / "concepts"
+    if not concepts_dir.exists():
+        return {}
+    result: dict[str, str] = {}
+    for path in sorted(concepts_dir.glob("*.md"), key=lambda p: p.stat().st_mtime):
+        text = path.read_text(encoding="utf-8")
+        brief = ""
+        body = text
+        if text.startswith("---"):
+            end = text.find("---", 3)
+            if end != -1:
+                fm, body = text[:end + 3], text[end + 3:]
+                for line in fm.split("\n"):
+                    if line.startswith("brief:"):
+                        brief = line[len("brief:"):].strip()
+                        break
+        if not brief:
+            brief = body.strip().replace("\n", " ")[:80]
+        result[path.stem] = brief
+    return result
 
 
 def _get_section_bounds(lines: list[str], heading: str) -> tuple[int, int] | None:
@@ -576,6 +601,7 @@ async def _compile_concepts(
     max_concurrency: int,
     doc_brief: str = "",
     doc_type: str = "short",
+    batch_state: BatchState | None = None,
 ) -> None:
     """Shared Steps 2-4: concepts plan → generate/update → index.
 
@@ -585,23 +611,30 @@ async def _compile_concepts(
     source_file = f"summaries/{doc_name}.md"
 
     # --- Step 2: Get concepts plan (A cached) ---
-    concept_briefs = _read_concept_briefs(wiki_dir)
+    if batch_state is not None:
+        concept_briefs = batch_state.format_for_prompt()
+    else:
+        concept_briefs = _read_concept_briefs(wiki_dir)
 
-    plan_raw = _llm_call(model, [
+    plan_raw = await _llm_call_async(model, [
         system_msg,
         doc_msg,
         {"role": "assistant", "content": summary},
         {"role": "user", "content": _CONCEPTS_PLAN_USER.format(
             concept_briefs=concept_briefs,
         )},
-    ], "concepts-plan", max_tokens=1024)
+    ], "concepts-plan")
 
     try:
         parsed = _parse_json(plan_raw)
     except (json.JSONDecodeError, ValueError) as exc:
         logger.warning("Failed to parse concepts plan: %s", exc)
         logger.debug("Raw: %s", plan_raw)
-        _update_index(wiki_dir, doc_name, [], doc_brief=doc_brief, doc_type=doc_type)
+        if batch_state is not None:
+            async with batch_state.index_lock:
+                _update_index(wiki_dir, doc_name, [], doc_brief=doc_brief, doc_type=doc_type)
+        else:
+            _update_index(wiki_dir, doc_name, [], doc_brief=doc_brief, doc_type=doc_type)
         return
 
     # Fallback: if LLM returns a flat list, treat all items as "create"
@@ -619,13 +652,17 @@ async def _compile_concepts(
     related_items = plan["related"]
 
     if not create_items and not update_items and not related_items:
-        _update_index(wiki_dir, doc_name, [], doc_brief=doc_brief, doc_type=doc_type)
+        if batch_state is not None:
+            async with batch_state.index_lock:
+                _update_index(wiki_dir, doc_name, [], doc_brief=doc_brief, doc_type=doc_type)
+        else:
+            _update_index(wiki_dir, doc_name, [], doc_brief=doc_brief, doc_type=doc_type)
         return
 
     # --- Step 3: Generate/update concept pages concurrently (A cached) ---
     semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def _gen_create(concept: dict) -> tuple[str, str, bool, str]:
+    async def _gen_create(concept: dict) -> tuple[str, str, bool, str, bool]:
         name = concept["name"]
         title = concept.get("title", name)
         async with semaphore:
@@ -644,19 +681,22 @@ async def _compile_concepts(
             content = parsed.get("content", raw)
         except (json.JSONDecodeError, ValueError):
             brief, content = "", raw
-        return name, content, False, brief
+        return name, content, False, brief, False
 
-    async def _gen_update(concept: dict) -> tuple[str, str, bool, str]:
+    async def _gen_update(concept: dict) -> tuple[str, str, bool, str, bool]:
         name = concept["name"]
         title = concept.get("title", name)
         concept_path = wiki_dir / "concepts" / f"{_sanitize_concept_name(name)}.md"
+        # B.2 — skip update LLM call if source already in concept's frontmatter
         if concept_path.exists():
-            raw_text = concept_path.read_text(encoding="utf-8")
-            if raw_text.startswith("---"):
-                parts = raw_text.split("---", 2)
-                existing_content = parts[2].strip() if len(parts) >= 3 else raw_text
+            existing_raw = concept_path.read_text(encoding="utf-8")
+            if source_file in existing_raw:
+                return name, "", True, "", True  # skip_write=True
+            if existing_raw.startswith("---"):
+                parts = existing_raw.split("---", 2)
+                existing_content = parts[2].strip() if len(parts) >= 3 else existing_raw
             else:
-                existing_content = raw_text
+                existing_content = existing_raw
         else:
             existing_content = "(page not found — create from scratch)"
         async with semaphore:
@@ -675,7 +715,7 @@ async def _compile_concepts(
             content = parsed.get("content", raw)
         except (json.JSONDecodeError, ValueError):
             brief, content = "", raw
-        return name, content, True, brief
+        return name, content, True, brief, False
 
     tasks = []
     tasks.extend(_gen_create(c) for c in create_items)
@@ -695,28 +735,60 @@ async def _compile_concepts(
             if isinstance(r, Exception):
                 logger.warning("Concept generation failed: %s", r)
                 continue
-            name, page_content, is_update, brief = r
-            _write_concept(wiki_dir, name, page_content, source_file, is_update, brief=brief)
+            name, page_content, is_update, brief, skip_write = r
             safe_name = _sanitize_concept_name(name)
+            if not skip_write:
+                if batch_state is not None:
+                    lock = await batch_state.get_concept_lock(safe_name)
+                    async with lock:
+                        _write_concept(wiki_dir, name, page_content, source_file, is_update, brief=brief)
+                        if brief:
+                            batch_state.update_concept_brief(safe_name, brief)
+                else:
+                    _write_concept(wiki_dir, name, page_content, source_file, is_update, brief=brief)
+                    if brief:
+                        concept_briefs_map[safe_name] = brief
+            else:
+                if batch_state is not None:
+                    lock = await batch_state.get_concept_lock(safe_name)
+                    async with lock:
+                        _add_related_link(wiki_dir, safe_name, doc_name, source_file)
+                else:
+                    _add_related_link(wiki_dir, safe_name, doc_name, source_file)
             concept_names.append(safe_name)
-            if brief:
-                concept_briefs_map[safe_name] = brief
 
     # --- Step 3b: Process related items (code only, no LLM) ---
     sanitized_related = [_sanitize_concept_name(s) for s in related_items]
     for slug in sanitized_related:
-        _add_related_link(wiki_dir, slug, doc_name, source_file)
+        if batch_state is not None:
+            lock = await batch_state.get_concept_lock(slug)
+            async with lock:
+                _add_related_link(wiki_dir, slug, doc_name, source_file)
+        else:
+            _add_related_link(wiki_dir, slug, doc_name, source_file)
 
     # --- Step 3c: Backlink — summary ↔ concepts (code only) ---
     all_concept_slugs = concept_names + sanitized_related
     if all_concept_slugs:
         _backlink_summary(wiki_dir, doc_name, all_concept_slugs)
-        _backlink_concepts(wiki_dir, doc_name, all_concept_slugs)
+        if batch_state is not None:
+            for slug in all_concept_slugs:
+                lock = await batch_state.get_concept_lock(slug)
+                async with lock:
+                    _backlink_concepts(wiki_dir, doc_name, [slug])
+        else:
+            _backlink_concepts(wiki_dir, doc_name, all_concept_slugs)
 
     # --- Step 4: Update index (code only) ---
-    _update_index(wiki_dir, doc_name, concept_names,
-                  doc_brief=doc_brief, concept_briefs=concept_briefs_map,
-                  doc_type=doc_type)
+    if batch_state is not None:
+        async with batch_state.index_lock:
+            _update_index(wiki_dir, doc_name, concept_names,
+                          doc_brief=doc_brief, concept_briefs=concept_briefs_map,
+                          doc_type=doc_type)
+    else:
+        _update_index(wiki_dir, doc_name, concept_names,
+                      doc_brief=doc_brief, concept_briefs=concept_briefs_map,
+                      doc_type=doc_type)
 
 
 async def compile_short_doc(
@@ -725,6 +797,7 @@ async def compile_short_doc(
     kb_dir: Path,
     model: str,
     max_concurrency: int = DEFAULT_COMPILE_CONCURRENCY,
+    batch_state: BatchState | None = None,
 ) -> None:
     """Compile a short document using a multi-step LLM pipeline with caching.
 
@@ -742,15 +815,19 @@ async def compile_short_doc(
     content = source_path.read_text(encoding="utf-8")
 
     # Base context A: system + document
-    system_msg = {"role": "system", "content": _SYSTEM_TEMPLATE.format(
-        schema_md=schema_md, language=language,
-    )}
+    system_msg = (
+        batch_state.system_msg
+        if batch_state is not None
+        else {"role": "system", "content": _SYSTEM_TEMPLATE.format(
+            schema_md=schema_md, language=language,
+        )}
+    )
     doc_msg = {"role": "user", "content": _SUMMARY_USER.format(
         doc_name=doc_name, content=content,
     )}
 
     # --- Step 1: Generate summary ---
-    summary_raw = _llm_call(model, [system_msg, doc_msg], "summary")
+    summary_raw = await _llm_call_async(model, [system_msg, doc_msg], "summary")
     try:
         summary_parsed = _parse_json(summary_raw)
         doc_brief = summary_parsed.get("brief", "")
@@ -764,7 +841,7 @@ async def compile_short_doc(
     await _compile_concepts(
         wiki_dir, kb_dir, model, system_msg, doc_msg,
         summary, doc_name, max_concurrency, doc_brief=doc_brief,
-        doc_type="short",
+        doc_type="short", batch_state=batch_state,
     )
 
 
@@ -776,6 +853,7 @@ async def compile_long_doc(
     model: str,
     doc_description: str = "",
     max_concurrency: int = DEFAULT_COMPILE_CONCURRENCY,
+    batch_state: BatchState | None = None,
 ) -> None:
     """Compile a long (PageIndex) document's concepts and index.
 
@@ -793,19 +871,23 @@ async def compile_long_doc(
     summary_content = summary_path.read_text(encoding="utf-8")
 
     # Base context A
-    system_msg = {"role": "system", "content": _SYSTEM_TEMPLATE.format(
-        schema_md=schema_md, language=language,
-    )}
+    system_msg = (
+        batch_state.system_msg
+        if batch_state is not None
+        else {"role": "system", "content": _SYSTEM_TEMPLATE.format(
+            schema_md=schema_md, language=language,
+        )}
+    )
     doc_msg = {"role": "user", "content": _LONG_DOC_SUMMARY_USER.format(
         doc_name=doc_name, doc_id=doc_id, content=summary_content,
     )}
 
     # --- Step 1: Generate overview ---
-    overview = _llm_call(model, [system_msg, doc_msg], "overview")
+    overview = await _llm_call_async(model, [system_msg, doc_msg], "overview")
 
     # --- Steps 2-4: Concept plan → generate/update → index ---
     await _compile_concepts(
         wiki_dir, kb_dir, model, system_msg, doc_msg,
         overview, doc_name, max_concurrency, doc_brief=doc_description,
-        doc_type="pageindex",
+        doc_type="pageindex", batch_state=batch_state,
     )

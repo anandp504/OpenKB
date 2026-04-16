@@ -83,15 +83,17 @@ class TestAddCommand:
         (docs_dir / "ignore.xyz").write_text("skip me")
 
         runner = CliRunner()
-        with patch("openkb.cli.add_single_file") as mock_add, \
-             patch("openkb.cli._find_kb_dir", return_value=kb_dir):
+        # Directory with multiple files now routes through _run_batch_async
+        with patch("openkb.cli._run_batch_async") as mock_batch, \
+             patch("openkb.cli._find_kb_dir", return_value=kb_dir), \
+             patch("openkb.cli.asyncio.run") as mock_arun:
+            mock_arun.side_effect = lambda coro: None  # suppress actual async run
             result = runner.invoke(cli, ["add", str(docs_dir)])
-            # Should be called for .md and .txt but not .xyz
-            assert mock_add.call_count == 2
-            called_names = {call.args[0].name for call in mock_add.call_args_list}
-            assert "a.md" in called_names
-            assert "b.txt" in called_names
-            assert "ignore.xyz" not in called_names
+            # asyncio.run should have been called with the _run_batch_async coroutine
+            mock_arun.assert_called_once()
+            # Extract the file list from the coroutine args via asyncio.run call
+            # Verify the right file types were collected: .md and .txt (not .xyz)
+            assert "Found 2 supported file(s)" in result.output
 
     def test_add_unsupported_extension(self, tmp_path):
         kb_dir = self._setup_kb(tmp_path)

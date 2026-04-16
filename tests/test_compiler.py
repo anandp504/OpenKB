@@ -356,10 +356,10 @@ class TestReadConceptBriefs:
         long_body = "A" * 300
         (concepts / "longconcept.md").write_text(long_body, encoding="utf-8")
         result = _read_concept_briefs(wiki)
-        # The brief part should be truncated at 150 chars
+        # The brief part should be truncated at 80 chars
         brief = result.split("- longconcept: ", 1)[1]
-        assert len(brief) == 150
-        assert brief == "A" * 150
+        assert len(brief) == 80
+        assert brief == "A" * 80
 
     def test_sorted_alphabetically(self, tmp_path):
         wiki = tmp_path / "wiki"
@@ -604,11 +604,9 @@ class TestCompileShortDoc:
         })
 
         with patch("openkb.agent.compiler.litellm") as mock_litellm:
-            mock_litellm.completion = MagicMock(
-                side_effect=_mock_completion([summary_response, concepts_list_response])
-            )
+            # summary and concepts-plan now use _llm_call_async (acompletion)
             mock_litellm.acompletion = AsyncMock(
-                side_effect=_mock_acompletion([concept_page_response])
+                side_effect=_mock_acompletion([summary_response, concepts_list_response, concept_page_response])
             )
             await compile_short_doc("test-doc", source_path, tmp_path, "gpt-4o-mini")
 
@@ -641,8 +639,9 @@ class TestCompileShortDoc:
         (tmp_path / ".openkb").mkdir()
 
         with patch("openkb.agent.compiler.litellm") as mock_litellm:
-            mock_litellm.completion = MagicMock(
-                side_effect=_mock_completion(["Plain summary text", "not valid json"])
+            # summary and concepts-plan now use _llm_call_async (acompletion)
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_mock_acompletion(["Plain summary text", "not valid json"])
             )
             # Should not raise
             await compile_short_doc("doc", source_path, tmp_path, "gpt-4o-mini")
@@ -681,11 +680,9 @@ class TestCompileLongDoc:
         })
 
         with patch("openkb.agent.compiler.litellm") as mock_litellm:
-            mock_litellm.completion = MagicMock(
-                side_effect=_mock_completion([overview_response, concepts_list_response])
-            )
+            # overview and concepts-plan now use _llm_call_async (acompletion)
             mock_litellm.acompletion = AsyncMock(
-                side_effect=_mock_acompletion([concept_page_response])
+                side_effect=_mock_acompletion([overview_response, concepts_list_response, concept_page_response])
             )
             await compile_long_doc(
                 "big-doc", summary_path, "doc-123", tmp_path, "gpt-4o-mini"
@@ -755,8 +752,10 @@ class TestCompileConceptsPlan:
             call_order["n"] += 1
             mock_resp = MagicMock()
             mock_resp.choices = [MagicMock()]
-            # create tasks come first, then update tasks
+            # idx=0: concepts-plan, idx=1: create page, idx=2: update page
             if idx == 0:
+                mock_resp.choices[0].message.content = plan_response
+            elif idx == 1:
                 mock_resp.choices[0].message.content = create_page_response
             else:
                 mock_resp.choices[0].message.content = update_page_response
@@ -765,9 +764,7 @@ class TestCompileConceptsPlan:
             return mock_resp
 
         with patch("openkb.agent.compiler.litellm") as mock_litellm:
-            mock_litellm.completion = MagicMock(
-                side_effect=_mock_completion([plan_response])
-            )
+            # concepts-plan now uses _llm_call_async (acompletion)
             mock_litellm.acompletion = AsyncMock(
                 side_effect=ordered_acompletion
             )
@@ -797,7 +794,7 @@ class TestCompileConceptsPlan:
 
     @pytest.mark.asyncio
     async def test_related_adds_link_no_llm(self, tmp_path):
-        """Plan has only related items. No acompletion calls should be made."""
+        """Plan has only related items. Only the plan step calls acompletion."""
         wiki = self._setup_wiki(tmp_path, existing_concepts={
             "transformer": "---\nsources: [old.pdf]\n---\n\n# Transformer\n\nContent about transformers.",
         })
@@ -813,16 +810,16 @@ class TestCompileConceptsPlan:
         summary = "Summary."
 
         with patch("openkb.agent.compiler.litellm") as mock_litellm:
-            mock_litellm.completion = MagicMock(
-                side_effect=_mock_completion([plan_response])
+            # concepts-plan now uses _llm_call_async (acompletion); no concept pages generated
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_mock_acompletion([plan_response])
             )
-            mock_litellm.acompletion = AsyncMock()
             await _compile_concepts(
                 wiki, tmp_path, "gpt-4o-mini", system_msg, doc_msg,
                 summary, "test-doc", 5,
             )
-            # acompletion should never be called — related is code-only
-            mock_litellm.acompletion.assert_not_called()
+            # acompletion called exactly once — for the plan step only
+            mock_litellm.acompletion.assert_called_once()
 
         # Verify link added to transformer page
         transformer_text = (wiki / "concepts" / "transformer.md").read_text()
@@ -847,11 +844,9 @@ class TestCompileConceptsPlan:
         summary = "Summary."
 
         with patch("openkb.agent.compiler.litellm") as mock_litellm:
-            mock_litellm.completion = MagicMock(
-                side_effect=_mock_completion([plan_response])
-            )
+            # concepts-plan now uses _llm_call_async (acompletion)
             mock_litellm.acompletion = AsyncMock(
-                side_effect=_mock_acompletion([concept_page_response])
+                side_effect=_mock_acompletion([plan_response, concept_page_response])
             )
             await _compile_concepts(
                 wiki, tmp_path, "gpt-4o-mini", system_msg, doc_msg,
@@ -898,11 +893,9 @@ class TestBriefIntegration:
         })
 
         with patch("openkb.agent.compiler.litellm") as mock_litellm:
-            mock_litellm.completion = MagicMock(
-                side_effect=_mock_completion([summary_resp, plan_resp])
-            )
+            # summary and concepts-plan now use _llm_call_async (acompletion)
             mock_litellm.acompletion = AsyncMock(
-                side_effect=_mock_acompletion([concept_resp])
+                side_effect=_mock_acompletion([summary_resp, plan_resp, concept_resp])
             )
             await compile_short_doc("test-doc", source_path, tmp_path, "gpt-4o-mini")
 

@@ -12,7 +12,7 @@ def test_init_creates_structure(tmp_path):
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path), \
          patch("openkb.cli.register_kb"):
-        result = runner.invoke(cli, ["init"])
+        result = runner.invoke(cli, ["init"], input="\n\n")
         assert result.exit_code == 0
 
         from pathlib import Path
@@ -45,7 +45,7 @@ def test_init_schema_content(tmp_path):
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path), \
          patch("openkb.cli.register_kb"):
-        result = runner.invoke(cli, ["init"])
+        result = runner.invoke(cli, ["init"], input="\n\n")
         assert result.exit_code == 0
 
         from pathlib import Path
@@ -58,7 +58,7 @@ def test_init_already_exists(tmp_path):
     with runner.isolated_filesystem(temp_dir=tmp_path), \
          patch("openkb.cli.register_kb"):
         # First run should succeed
-        result = runner.invoke(cli, ["init"])
+        result = runner.invoke(cli, ["init"], input="\n\n")
         assert result.exit_code == 0
 
         # Second run should print already initialized message

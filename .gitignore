@@ -17,3 +17,5 @@ wiki/
 # Local only
 docs/
 .claude/
+!.claude/agents/
+!.claude/agents/**
