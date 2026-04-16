@@ -63,7 +63,10 @@ def _setup_llm_key(kb_dir: Path | None = None) -> None:
     api_key = os.environ.get("LLM_API_KEY", "")
     if not api_key:
         # Check if any provider key is already set
-        has_key = any(os.environ.get(k) for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"))
+        has_key = any(os.environ.get(k) for k in (
+            "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+            "OLLAMA_API_BASE",  # Ollama uses a base URL, not an API key
+        ))
         if not has_key:
             click.echo(
                 "Warning: No LLM API key found. Set one of:\n"

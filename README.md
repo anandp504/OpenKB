@@ -198,6 +198,28 @@ Model names use `provider/model` LiteLLM [format](https://docs.litellm.ai/docs/p
 | OpenAI | `gpt-5.4` |
 | Anthropic | `anthropic/claude-sonnet-4-6` |
 | Gemini | `gemini/gemini-3.1-pro-preview` |
+| Ollama (local) | `ollama/llama3.2` |
+
+### Local Models via Ollama
+
+Run any Ollama model locally — no API key required.
+
+**1. Configure OpenKB to use Ollama**
+
+During `openkb init`, enter `ollama/<model>` as the model name. Or set it directly in `.openkb/config.yaml`:
+
+```yaml
+model: ollama/llama3.2
+```
+
+LiteLLM routes `ollama/` prefixed models through Ollama's OpenAI-compatible endpoint automatically. No `.env` API key is needed.
+
+**Custom Ollama host** (e.g. running on a remote machine):
+
+```bash
+# .env
+OLLAMA_API_BASE=http://192.168.1.100:11434
+```
 
 ### PageIndex Integration
 
