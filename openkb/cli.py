@@ -38,20 +38,6 @@ warnings.filterwarnings("ignore")
 
 load_dotenv()  # load from cwd (covers running inside the KB dir)
 
-
-def _echo_llm_config(model: str) -> None:
-    """Print the resolved LLM model and endpoint to stdout once per invocation."""
-    parts = [f"LLM: {model}"]
-    for env_var, label in (
-        ("OLLAMA_API_BASE", "ollama"),
-        ("OPENAI_API_BASE", "base_url"),
-    ):
-        val = os.environ.get(env_var, "")
-        if val:
-            parts.append(f"{label}={val}")
-    click.echo(" | ".join(parts))
-
-
 def _setup_llm_key(kb_dir: Path | None = None) -> None:
     """Set LiteLLM API key from LLM_API_KEY env var if present.
 
@@ -163,9 +149,8 @@ def add_single_file(file_path: Path, kb_dir: Path) -> None:
     config = load_config(openkb_dir / "config.yaml")
     _setup_llm_key(kb_dir)
     model: str = config.get("model", DEFAULT_CONFIG["model"])
+    max_concurrency: int = config.get("max_concurrency", DEFAULT_CONFIG["max_concurrency"])
     registry = HashRegistry(openkb_dir / "hashes.json")
-
-    _echo_llm_config(model)
 
     # 2. Convert document
     click.echo(f"Adding: {file_path.name}")
@@ -199,7 +184,8 @@ def add_single_file(file_path: Path, kb_dir: Path) -> None:
             try:
                 asyncio.run(
                     compile_long_doc(doc_name, summary_path, index_result.doc_id, kb_dir, model,
-                                     doc_description=index_result.description)
+                                     doc_description=index_result.description,
+                                     max_concurrency=max_concurrency)
                 )
                 break
             except Exception as exc:
@@ -214,7 +200,8 @@ def add_single_file(file_path: Path, kb_dir: Path) -> None:
         click.echo(f"  Compiling short doc...")
         for attempt in range(2):
             try:
-                asyncio.run(compile_short_doc(doc_name, result.source_path, kb_dir, model))
+                asyncio.run(compile_short_doc(doc_name, result.source_path, kb_dir, model,
+                                              max_concurrency=max_concurrency))
                 break
             except Exception as exc:
                 if attempt == 0:
@@ -253,8 +240,7 @@ async def add_single_file_async(
     config = load_config(openkb_dir / "config.yaml")
     _setup_llm_key(kb_dir)
     model: str = config.get("model", DEFAULT_CONFIG["model"])
-
-    _echo_llm_config(model)
+    max_concurrency: int = config.get("max_concurrency", DEFAULT_CONFIG["max_concurrency"])
 
     async def _echo(msg: str) -> None:
         if batch_state is not None:
@@ -307,6 +293,7 @@ async def add_single_file_async(
                     await compile_long_doc(
                         doc_name, summary_path, index_result.doc_id, kb_dir, model,
                         doc_description=index_result.description,
+                        max_concurrency=max_concurrency,
                         batch_state=batch_state,
                     )
                     break
@@ -324,6 +311,7 @@ async def add_single_file_async(
                 try:
                     await compile_short_doc(
                         doc_name, result.source_path, kb_dir, model,
+                        max_concurrency=max_concurrency,
                         batch_state=batch_state,
                     )
                     break

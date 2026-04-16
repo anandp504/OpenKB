@@ -616,6 +616,8 @@ async def _compile_concepts(
     else:
         concept_briefs = _read_concept_briefs(wiki_dir)
 
+    sys.stdout.write("    concepts-plan...\n")
+    sys.stdout.flush()
     plan_raw = await _llm_call_async(model, [
         system_msg,
         doc_msg,

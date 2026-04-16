@@ -9,7 +9,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model": "gpt-5.4-mini",
     "language": "en",
     "pageindex_threshold": 20,
-    "batch_concurrency": 3,
+    "batch_concurrency": 1,
+    "max_concurrency": 1,
 }
 
 GLOBAL_CONFIG_DIR = Path.home() / ".config" / "openkb"
