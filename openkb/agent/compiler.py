@@ -664,9 +664,12 @@ async def _compile_concepts(
     # --- Step 3: Generate/update concept pages concurrently (A cached) ---
     semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def _gen_create(concept: dict) -> tuple[str, str, bool, str, bool]:
-        name = concept["name"]
-        title = concept.get("title", name)
+    async def _gen_create(concept: dict | str) -> tuple[str, str, bool, str, bool]:
+        if isinstance(concept, str):
+            name, title = concept, concept
+        else:
+            name = concept.get("name", str(concept))
+            title = concept.get("title", name)
         async with semaphore:
             raw = await _llm_call_async(model, [
                 system_msg,
@@ -679,15 +682,21 @@ async def _compile_concepts(
             ], f"concept: {name}")
         try:
             parsed = _parse_json(raw)
-            brief = parsed.get("brief", "")
-            content = parsed.get("content", raw)
+            if isinstance(parsed, dict):
+                brief = parsed.get("brief", "")
+                content = parsed.get("content", raw)
+            else:
+                brief, content = "", raw
         except (json.JSONDecodeError, ValueError):
             brief, content = "", raw
         return name, content, False, brief, False
 
-    async def _gen_update(concept: dict) -> tuple[str, str, bool, str, bool]:
-        name = concept["name"]
-        title = concept.get("title", name)
+    async def _gen_update(concept: dict | str) -> tuple[str, str, bool, str, bool]:
+        if isinstance(concept, str):
+            name, title = concept, concept
+        else:
+            name = concept.get("name", str(concept))
+            title = concept.get("title", name)
         concept_path = wiki_dir / "concepts" / f"{_sanitize_concept_name(name)}.md"
         # B.2 — skip update LLM call if source already in concept's frontmatter
         if concept_path.exists():
@@ -713,8 +722,11 @@ async def _compile_concepts(
             ], f"update: {name}")
         try:
             parsed = _parse_json(raw)
-            brief = parsed.get("brief", "")
-            content = parsed.get("content", raw)
+            if isinstance(parsed, dict):
+                brief = parsed.get("brief", "")
+                content = parsed.get("content", raw)
+            else:
+                brief, content = "", raw
         except (json.JSONDecodeError, ValueError):
             brief, content = "", raw
         return name, content, True, brief, False
@@ -760,7 +772,15 @@ async def _compile_concepts(
             concept_names.append(safe_name)
 
     # --- Step 3b: Process related items (code only, no LLM) ---
-    sanitized_related = [_sanitize_concept_name(s) for s in related_items]
+    # Normalise: LLMs sometimes return objects instead of plain strings here
+    def _coerce_slug(item: object) -> str:
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            return str(item.get("name", ""))
+        return str(item)
+
+    sanitized_related = [_sanitize_concept_name(_coerce_slug(s)) for s in related_items]
     for slug in sanitized_related:
         if batch_state is not None:
             lock = await batch_state.get_concept_lock(slug)
@@ -832,8 +852,12 @@ async def compile_short_doc(
     summary_raw = await _llm_call_async(model, [system_msg, doc_msg], "summary")
     try:
         summary_parsed = _parse_json(summary_raw)
-        doc_brief = summary_parsed.get("brief", "")
-        summary = summary_parsed.get("content", summary_raw)
+        if isinstance(summary_parsed, dict):
+            doc_brief = summary_parsed.get("brief", "")
+            summary = summary_parsed.get("content", summary_raw)
+        else:
+            doc_brief = ""
+            summary = summary_raw
     except (json.JSONDecodeError, ValueError):
         doc_brief = ""
         summary = summary_raw

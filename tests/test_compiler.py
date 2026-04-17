@@ -912,3 +912,210 @@ class TestBriefIntegration:
         index_text = (wiki / "index.md").read_text()
         assert "— A paper about transformers" in index_text
         assert "— NN architecture using self-attention" in index_text
+
+
+class TestLLMReturnFormatRobustness:
+    """Regression tests for malformed LLM responses.
+
+    These cover two real bugs where LLMs return a JSON list in places the code
+    expected a dict, or return objects in the 'related' array instead of strings.
+    """
+
+    def _setup_wiki(self, tmp_path, existing_concepts=None):
+        wiki = tmp_path / "wiki"
+        (wiki / "summaries").mkdir(parents=True)
+        (wiki / "concepts").mkdir(parents=True)
+        (wiki / "index.md").write_text(
+            "# Index\n\n## Documents\n\n## Concepts\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "raw").mkdir(exist_ok=True)
+        if existing_concepts:
+            for name, content in existing_concepts.items():
+                (wiki / "concepts" / f"{name}.md").write_text(content, encoding="utf-8")
+        return wiki
+
+    # ------------------------------------------------------------------
+    # Bug 1: 'list' object has no attribute 'get'
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_concept_page_returns_list_no_exception(self, tmp_path):
+        """LLM returns a JSON list for a concept page instead of {brief, content}.
+
+        Previously raised AttributeError ('list' object has no attribute 'get')
+        which was not caught by except (JSONDecodeError, ValueError), causing the
+        task to fail silently and index.md to still be updated (doc entry only).
+        After the fix the concept is written with raw content and empty brief.
+        """
+        wiki = self._setup_wiki(tmp_path)
+        plan_response = json.dumps({
+            "create": [{"name": "attention", "title": "Attention"}],
+            "update": [],
+            "related": [],
+        })
+        # Malformed: list instead of {"brief": ..., "content": ...}
+        concept_list_response = json.dumps(["some", "list", "items"])
+
+        system_msg = {"role": "system", "content": "wiki agent"}
+        doc_msg = {"role": "user", "content": "doc content"}
+
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_mock_acompletion([plan_response, concept_list_response])
+            )
+            # Must not raise
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini", system_msg, doc_msg,
+                "summary text", "test-doc", 5,
+            )
+
+        # Concept written with raw content (empty brief is fine)
+        assert (wiki / "concepts" / "attention.md").exists()
+        # Doc entry still lands in index.md
+        assert "[[summaries/test-doc]]" in (wiki / "index.md").read_text()
+        # Concept entry also lands in index.md (safe_name added to concept_names)
+        assert "[[concepts/attention]]" in (wiki / "index.md").read_text()
+
+    @pytest.mark.asyncio
+    async def test_create_items_as_strings_no_exception(self, tmp_path):
+        """LLM returns create items as plain strings instead of {name, title} dicts.
+
+        Previously, concept.get("title", name) raised AttributeError on a str.
+        After the fix, strings are treated as both name and title.
+        """
+        wiki = self._setup_wiki(tmp_path)
+        plan_response = json.dumps({
+            "create": ["attention", "transformer"],   # strings, not dicts
+            "update": [],
+            "related": [],
+        })
+        concept_page_response = json.dumps({
+            "brief": "A focusing mechanism",
+            "content": "# Concept\n\nContent.",
+        })
+
+        system_msg = {"role": "system", "content": "wiki agent"}
+        doc_msg = {"role": "user", "content": "doc content"}
+
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_mock_acompletion(
+                    [plan_response, concept_page_response, concept_page_response]
+                )
+            )
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini", system_msg, doc_msg,
+                "summary text", "test-doc", 5,
+            )
+
+        index_text = (wiki / "index.md").read_text()
+        assert "[[summaries/test-doc]]" in index_text
+        # Both string-named concepts should appear
+        assert "[[concepts/attention]]" in index_text
+        assert "[[concepts/transformer]]" in index_text
+
+    @pytest.mark.asyncio
+    async def test_summary_returns_list_falls_back_gracefully(self, tmp_path):
+        """Summary LLM returns a JSON list instead of {brief, content}.
+
+        Previously raised AttributeError at summary_parsed.get() which was not
+        caught, propagating out of compile_short_doc and bypassing _update_index.
+        After the fix, doc_brief="" and summary=raw_text; compilation continues.
+        """
+        wiki = tmp_path / "wiki"
+        (wiki / "sources").mkdir(parents=True)
+        (wiki / "summaries").mkdir(parents=True)
+        (wiki / "index.md").write_text(
+            "# Index\n\n## Documents\n\n## Concepts\n", encoding="utf-8"
+        )
+        source_path = wiki / "sources" / "doc.md"
+        source_path.write_text("Content", encoding="utf-8")
+        (tmp_path / ".openkb").mkdir()
+
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_mock_acompletion([
+                    json.dumps(["item1", "item2"]),          # list — should fall back
+                    '{"create":[],"update":[],"related":[]}',  # concepts plan
+                ])
+            )
+            await compile_short_doc("doc", source_path, tmp_path, "gpt-4o-mini")
+
+        # Summary written (raw JSON list as content, no brief)
+        assert (wiki / "summaries" / "doc.md").exists()
+        # Doc entry still lands in index.md
+        assert "[[summaries/doc]]" in (wiki / "index.md").read_text()
+
+    # ------------------------------------------------------------------
+    # Bug 2: index.md not updated — related_items contains objects
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_related_items_as_objects_index_still_updated(self, tmp_path):
+        """LLM returns 'related' as objects instead of plain slug strings.
+
+        Previously _sanitize_concept_name(dict) raised TypeError (unicodedata.normalize
+        requires str), which propagated uncaught from _compile_concepts, causing
+        compile_short_doc to fail the retry loop and return early — skipping
+        _update_index entirely, so index.md was never updated.
+        After the fix, objects are coerced to their 'name' string.
+        """
+        wiki = self._setup_wiki(tmp_path, existing_concepts={
+            "transformer": "---\nsources: [old.pdf]\n---\n\n# Transformer\n\nContent.",
+        })
+        plan_response = json.dumps({
+            "create": [],
+            "update": [],
+            "related": [{"name": "transformer"}],   # object instead of plain string
+        })
+
+        system_msg = {"role": "system", "content": "wiki agent"}
+        doc_msg = {"role": "user", "content": "doc content"}
+
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_mock_acompletion([plan_response])
+            )
+            # Must not raise TypeError
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini", system_msg, doc_msg,
+                "summary text", "test-doc", 5,
+            )
+
+        # Index must be updated (the whole point of the bug fix)
+        index_text = (wiki / "index.md").read_text()
+        assert "[[summaries/test-doc]]" in index_text
+
+        # Related link added to the concept page
+        transformer_text = (wiki / "concepts" / "transformer.md").read_text()
+        assert "[[summaries/test-doc]]" in transformer_text
+
+    @pytest.mark.asyncio
+    async def test_related_items_mixed_strings_and_objects(self, tmp_path):
+        """'related' array mixes plain strings and objects — both are handled."""
+        wiki = self._setup_wiki(tmp_path, existing_concepts={
+            "attention": "---\nsources: [old.pdf]\n---\n\n# Attention\n\nContent.",
+            "transformer": "---\nsources: [old.pdf]\n---\n\n# Transformer\n\nContent.",
+        })
+        plan_response = json.dumps({
+            "create": [],
+            "update": [],
+            "related": ["attention", {"name": "transformer"}],
+        })
+
+        system_msg = {"role": "system", "content": "wiki agent"}
+        doc_msg = {"role": "user", "content": "doc content"}
+
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_mock_acompletion([plan_response])
+            )
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini", system_msg, doc_msg,
+                "summary text", "test-doc", 5,
+            )
+
+        assert "[[summaries/test-doc]]" in (wiki / "index.md").read_text()
+        assert "[[summaries/test-doc]]" in (wiki / "concepts" / "attention.md").read_text()
+        assert "[[summaries/test-doc]]" in (wiki / "concepts" / "transformer.md").read_text()
