@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,11 +37,13 @@ def convert_document(src: Path, kb_dir: Path) -> ConvertResult:
 
     Steps:
     1. Hash-check — skip if already known.
-    2. Copy source to ``raw/``.
-    3. If PDF and page count >= threshold → return :attr:`ConvertResult.is_long_doc`.
-    4. If ``.md`` — read, process relative images, save to ``wiki/sources/``.
-    5. Otherwise — run MarkItDown, extract base64 images, save to ``wiki/sources/``.
-    6. Register hash in the registry.
+    2. If PDF and page count >= threshold → return :attr:`ConvertResult.is_long_doc`.
+    3. If ``.md`` — read, process relative images, save to ``wiki/sources/``.
+    4. Otherwise — run MarkItDown, extract base64 images, save to ``wiki/sources/``.
+
+    The original source file is not copied anywhere — ``raw_path`` points back to
+    ``src`` for long PDFs (so PageIndex can read it from its original location).
+    Short-doc content is fully captured in ``wiki/sources/`` after conversion.
     """
     # ------------------------------------------------------------------
     # Load config & state
@@ -61,16 +62,7 @@ def convert_document(src: Path, kb_dir: Path) -> ConvertResult:
         return ConvertResult(skipped=True)
 
     # ------------------------------------------------------------------
-    # 2. Copy to raw/
-    # ------------------------------------------------------------------
-    raw_dir = kb_dir / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    raw_dest = raw_dir / src.name
-    if raw_dest.resolve() != src.resolve():
-        shutil.copy2(src, raw_dest)
-
-    # ------------------------------------------------------------------
-    # 3. PDF long-doc detection
+    # 2. PDF long-doc detection
     # ------------------------------------------------------------------
     if src.suffix.lower() == ".pdf":
         page_count = get_pdf_page_count(src)
@@ -81,10 +73,10 @@ def convert_document(src: Path, kb_dir: Path) -> ConvertResult:
                 threshold,
                 src.name,
             )
-            return ConvertResult(raw_path=raw_dest, is_long_doc=True, file_hash=file_hash)
+            return ConvertResult(raw_path=src, is_long_doc=True, file_hash=file_hash)
 
     # ------------------------------------------------------------------
-    # 4/5. Convert to Markdown
+    # 3/4. Convert to Markdown
     # ------------------------------------------------------------------
     sources_dir = kb_dir / "wiki" / "sources"
     sources_dir.mkdir(parents=True, exist_ok=True)
@@ -109,4 +101,4 @@ def convert_document(src: Path, kb_dir: Path) -> ConvertResult:
     dest_md = sources_dir / f"{doc_name}.md"
     dest_md.write_text(markdown, encoding="utf-8")
 
-    return ConvertResult(raw_path=raw_dest, source_path=dest_md, file_hash=file_hash)
+    return ConvertResult(raw_path=src, source_path=dest_md, file_hash=file_hash)
