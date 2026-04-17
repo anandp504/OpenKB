@@ -649,9 +649,9 @@ async def _compile_concepts(
             "related": parsed.get("related", []),
         }
 
-    create_items = plan["create"]
-    update_items = plan["update"]
-    related_items = plan["related"]
+    create_items = plan["create"] if isinstance(plan["create"], list) else []
+    update_items = plan["update"] if isinstance(plan["update"], list) else []
+    related_items = plan["related"] if isinstance(plan["related"], list) else []
 
     if not create_items and not update_items and not related_items:
         if batch_state is not None:

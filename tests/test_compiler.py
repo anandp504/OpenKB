@@ -1119,3 +1119,72 @@ class TestLLMReturnFormatRobustness:
         assert "[[summaries/test-doc]]" in (wiki / "index.md").read_text()
         assert "[[summaries/test-doc]]" in (wiki / "concepts" / "attention.md").read_text()
         assert "[[summaries/test-doc]]" in (wiki / "concepts" / "transformer.md").read_text()
+
+    @pytest.mark.asyncio
+    async def test_null_create_update_related_index_still_updated(self, tmp_path):
+        """LLM returns null for create/update/related instead of empty arrays.
+
+        parsed.get("create", []) only uses the default when the key is absent.
+        When the key is present with value null, it returns None. Iterating over
+        None raises TypeError which propagated uncaught, exhausting the retry loop
+        and bypassing _update_index — so index.md was never updated.
+        After the fix, null values are normalised to [] and index.md is updated.
+        """
+        wiki = self._setup_wiki(tmp_path)
+        plan_response = json.dumps({
+            "create": None,
+            "update": None,
+            "related": None,
+        })
+
+        system_msg = {"role": "system", "content": "wiki agent"}
+        doc_msg = {"role": "user", "content": "doc content"}
+
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_mock_acompletion([plan_response])
+            )
+            # Must not raise TypeError
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini", system_msg, doc_msg,
+                "summary text", "test-doc", 5,
+            )
+
+        # Index must still be updated despite null values
+        assert "[[summaries/test-doc]]" in (wiki / "index.md").read_text()
+
+    @pytest.mark.asyncio
+    async def test_null_create_with_nonempty_update_index_still_updated(self, tmp_path):
+        """Null create + non-empty update — the case that actually crashes.
+
+        When create=null but update=[...], the early-return guard
+        (not None and not [...]) evaluates to False (because not [...] is False),
+        so execution falls through to tasks.extend(_gen_create(c) for c in None)
+        which raises TypeError. This variant confirms the fix handles mixed nulls.
+        """
+        wiki = self._setup_wiki(tmp_path, existing_concepts={
+            "attention": "---\nsources: [old.pdf]\n---\n\n# Attention\n\nContent.",
+        })
+        plan_response = json.dumps({
+            "create": None,
+            "update": [{"name": "attention", "title": "Attention"}],
+            "related": None,
+        })
+        concept_response = json.dumps({
+            "brief": "A focusing mechanism",
+            "content": "# Attention\n\nUpdated content.",
+        })
+
+        system_msg = {"role": "system", "content": "wiki agent"}
+        doc_msg = {"role": "user", "content": "doc content"}
+
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_mock_acompletion([plan_response, concept_response])
+            )
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini", system_msg, doc_msg,
+                "summary text", "test-doc", 5,
+            )
+
+        assert "[[summaries/test-doc]]" in (wiki / "index.md").read_text()
