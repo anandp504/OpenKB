@@ -61,7 +61,11 @@ def _setup_llm_key(kb_dir: Path | None = None) -> None:
     api_key = os.environ.get("LLM_API_KEY", "")
     if not api_key:
         # Check if any provider key is already set
-        has_key = any(os.environ.get(k) for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"))
+        has_key = any(os.environ.get(k) for k in (
+            "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+            "MINIMAX_API_KEY",
+            "OLLAMA_API_BASE",  # Ollama uses a base URL, not an API key
+        ))
         if not has_key:
             click.echo(
                 "Warning: No LLM API key found. Set one of:\n"
@@ -74,6 +78,27 @@ def _setup_llm_key(kb_dir: Path | None = None) -> None:
         for env_var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
             if not os.environ.get(env_var):
                 os.environ[env_var] = api_key
+
+
+def _debug_llm_key(model: str) -> None:
+    """Print which API key LiteLLM will actually use for the configured model."""
+    provider = model.split("/")[0] if "/" in model else "openai"
+    key_vars: list[tuple[str, str]] = {
+        "minimax": [("MINIMAX_API_KEY", "minimax")],
+        "anthropic": [("ANTHROPIC_API_KEY", "anthropic"), ("ANTHROPIC_AUTH_TOKEN", "anthropic (token)")],
+        "openai": [("OPENAI_API_KEY", "openai"), ("LLM_API_KEY", "generic")],
+        "gemini": [("GEMINI_API_KEY", "gemini"), ("LLM_API_KEY", "generic")],
+        "ollama": [("OLLAMA_API_BASE", "ollama base")],
+    }.get(provider, [("LLM_API_KEY", "generic")])
+
+    for env_var, label in key_vars:
+        val = os.environ.get(env_var, "")
+        if val:
+            masked = val[:6] + "..." if len(val) > 6 else "***"
+            click.echo(f"  LLM: {model} | {label} key: {masked}")
+            return
+    click.echo(f"  LLM: {model} | WARNING: no API key found for {provider}")
+
 
 # Supported document extensions for the `add` command
 SUPPORTED_EXTENSIONS = {
@@ -146,6 +171,7 @@ def add_single_file(file_path: Path, kb_dir: Path) -> None:
     _setup_llm_key(kb_dir)
     model: str = config.get("model", DEFAULT_CONFIG["model"])
     registry = HashRegistry(openkb_dir / "hashes.json")
+    _debug_llm_key(model)
 
     # 2. Convert document
     click.echo(f"Adding: {file_path.name}")

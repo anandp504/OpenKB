@@ -193,11 +193,57 @@ pageindex_threshold: 20          # PDF pages threshold for PageIndex
 
 Model names use `provider/model` LiteLLM [format](https://docs.litellm.ai/docs/providers) (OpenAI models can omit the prefix):
 
-| Provider | Model example |
-|---|---|
-| OpenAI | `gpt-5.4` |
-| Anthropic | `anthropic/claude-sonnet-4-6` |
-| Gemini | `gemini/gemini-3.1-pro-preview` |
+| Provider | Model example | API key env var |
+|---|---|---|
+| OpenAI | `gpt-5.4` | `OPENAI_API_KEY` or `LLM_API_KEY` |
+| Anthropic | `anthropic/claude-sonnet-4-6` | `ANTHROPIC_API_KEY` or `LLM_API_KEY` |
+| Gemini | `gemini/gemini-3.1-pro-preview` | `GEMINI_API_KEY` or `LLM_API_KEY` |
+| MiniMax | `minimax/MiniMax-M2.1` | `MINIMAX_API_KEY` |
+| Ollama (local) | `ollama/llama3.2` | none (set `OLLAMA_API_BASE`) |
+
+### Local Models via Ollama
+
+Run any Ollama model locally — no API key required.
+
+**1. Configure OpenKB to use Ollama**
+
+During `openkb init`, enter `ollama/<model>` as the model name. Or set it directly in `.openkb/config.yaml`:
+
+```yaml
+model: ollama/llama3.2
+```
+
+LiteLLM routes `ollama/` prefixed models through Ollama's OpenAI-compatible endpoint automatically. No `.env` API key is needed.
+
+**Custom Ollama host** (e.g. running on a remote machine):
+
+```bash
+# .env
+OLLAMA_API_BASE=http://192.168.1.100:11434
+```
+
+### MiniMax
+
+[MiniMax](https://www.minimax.io) offers fast, low-cost models via an OpenAI-compatible API.
+
+**1. Get an API key** from [api.minimax.io](https://api.minimax.io)
+
+**2. Add to your `.env`**
+
+```bash
+MINIMAX_API_KEY=your_minimax_api_key
+```
+
+**3. Set the model in `.openkb/config.yaml`**
+
+```yaml
+model: minimax/MiniMax-M2.1
+# model: minimax/MiniMax-M2.5
+```
+
+LiteLLM routes `minimax/` prefixed models to `https://api.minimax.io/v1` with `Authorization: Bearer <MINIMAX_API_KEY>`.
+
+> **Note**: Do not set `MINIMAX_API_KEY` via `ANTHROPIC_API_KEY` or `LLM_API_KEY` — use `MINIMAX_API_KEY` directly. Other provider keys set in your shell environment (e.g. `ANTHROPIC_API_KEY` for Claude) will not interfere with `MINIMAX_API_KEY`.
 
 ### PageIndex Integration
 
