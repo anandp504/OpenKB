@@ -866,6 +866,76 @@ class TestCompileConceptsPlan:
         assert "Attention" in att_text
 
 
+class TestLLMReturnFormatRobustness:
+    """Regression tests: malformed LLM responses must not skip index.md update."""
+
+    def _setup_wiki(self, tmp_path, existing_concepts=None):
+        wiki = tmp_path / "wiki"
+        (wiki / "summaries").mkdir(parents=True)
+        (wiki / "concepts").mkdir(parents=True)
+        (wiki / "index.md").write_text(
+            "# Index\n\n## Documents\n\n## Concepts\n", encoding="utf-8",
+        )
+        (tmp_path / "raw").mkdir(exist_ok=True)
+        (tmp_path / "raw" / "test-doc.pdf").write_bytes(b"fake")
+        if existing_concepts:
+            for name, content in existing_concepts.items():
+                (wiki / "concepts" / f"{name}.md").write_text(content, encoding="utf-8")
+        return wiki
+
+    @pytest.mark.asyncio
+    async def test_concepts_plan_llm_raises_index_still_updated(self, tmp_path):
+        wiki = self._setup_wiki(tmp_path)
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.completion = MagicMock(side_effect=Exception("API error"))
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini",
+                {"role": "system", "content": "wiki agent"},
+                {"role": "user", "content": "doc content"},
+                "summary text", "test-doc", 5,
+            )
+        assert "[[summaries/test-doc]]" in (wiki / "index.md").read_text()
+
+    @pytest.mark.asyncio
+    async def test_null_create_update_related_index_still_updated(self, tmp_path):
+        wiki = self._setup_wiki(tmp_path)
+        plan_response = json.dumps({"create": None, "update": None, "related": None})
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.completion = MagicMock(
+                side_effect=_mock_completion([plan_response])
+            )
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini",
+                {"role": "system", "content": "wiki agent"},
+                {"role": "user", "content": "doc content"},
+                "summary text", "test-doc", 5,
+            )
+        assert "[[summaries/test-doc]]" in (wiki / "index.md").read_text()
+
+    @pytest.mark.asyncio
+    async def test_related_items_as_objects_index_still_updated(self, tmp_path):
+        wiki = self._setup_wiki(tmp_path, existing_concepts={
+            "transformer": "---\nsources: [old.pdf]\n---\n\n# Transformer\n\nContent.",
+        })
+        plan_response = json.dumps({
+            "create": [], "update": [],
+            "related": [{"name": "transformer", "title": "Transformer"}],
+        })
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.completion = MagicMock(
+                side_effect=_mock_completion([plan_response])
+            )
+            mock_litellm.acompletion = AsyncMock()
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini",
+                {"role": "system", "content": "wiki agent"},
+                {"role": "user", "content": "doc content"},
+                "summary text", "test-doc", 5,
+            )
+        assert "[[summaries/test-doc]]" in (wiki / "index.md").read_text()
+        mock_litellm.acompletion.assert_not_called()
+
+
 class TestBriefIntegration:
     @pytest.mark.asyncio
     async def test_short_doc_briefs_in_index_and_frontmatter(self, tmp_path):

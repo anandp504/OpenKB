@@ -587,14 +587,19 @@ async def _compile_concepts(
     # --- Step 2: Get concepts plan (A cached) ---
     concept_briefs = _read_concept_briefs(wiki_dir)
 
-    plan_raw = _llm_call(model, [
-        system_msg,
-        doc_msg,
-        {"role": "assistant", "content": summary},
-        {"role": "user", "content": _CONCEPTS_PLAN_USER.format(
-            concept_briefs=concept_briefs,
-        )},
-    ], "concepts-plan", max_tokens=1024)
+    try:
+        plan_raw = _llm_call(model, [
+            system_msg,
+            doc_msg,
+            {"role": "assistant", "content": summary},
+            {"role": "user", "content": _CONCEPTS_PLAN_USER.format(
+                concept_briefs=concept_briefs,
+            )},
+        ], "concepts-plan", max_tokens=1024)
+    except Exception as exc:
+        logger.warning("Concepts-plan LLM call failed: %s", exc)
+        _update_index(wiki_dir, doc_name, [], doc_brief=doc_brief, doc_type=doc_type)
+        return
 
     try:
         parsed = _parse_json(plan_raw)
@@ -614,9 +619,9 @@ async def _compile_concepts(
             "related": parsed.get("related", []),
         }
 
-    create_items = plan["create"]
-    update_items = plan["update"]
-    related_items = plan["related"]
+    create_items = plan["create"] if isinstance(plan["create"], list) else []
+    update_items = plan["update"] if isinstance(plan["update"], list) else []
+    related_items = plan["related"] if isinstance(plan["related"], list) else []
 
     if not create_items and not update_items and not related_items:
         _update_index(wiki_dir, doc_name, [], doc_brief=doc_brief, doc_type=doc_type)
@@ -703,7 +708,15 @@ async def _compile_concepts(
                 concept_briefs_map[safe_name] = brief
 
     # --- Step 3b: Process related items (code only, no LLM) ---
-    sanitized_related = [_sanitize_concept_name(s) for s in related_items]
+    # Normalise: LLMs sometimes return objects instead of plain strings here
+    def _coerce_slug(item: object) -> str:
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            return str(item.get("name", ""))
+        return str(item)
+
+    sanitized_related = [_sanitize_concept_name(_coerce_slug(s)) for s in related_items]
     for slug in sanitized_related:
         _add_related_link(wiki_dir, slug, doc_name, source_file)
 
