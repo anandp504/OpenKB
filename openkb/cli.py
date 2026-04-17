@@ -171,7 +171,6 @@ def add_single_file(file_path: Path, kb_dir: Path) -> None:
     _setup_llm_key(kb_dir)
     model: str = config.get("model", DEFAULT_CONFIG["model"])
     registry = HashRegistry(openkb_dir / "hashes.json")
-    _debug_llm_key(model)
 
     # 2. Convert document
     click.echo(f"Adding: {file_path.name}")
