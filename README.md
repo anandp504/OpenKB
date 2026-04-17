@@ -198,7 +198,7 @@ Model names use `provider/model` LiteLLM [format](https://docs.litellm.ai/docs/p
 | OpenAI | `gpt-5.4` | `OPENAI_API_KEY` or `LLM_API_KEY` |
 | Anthropic | `anthropic/claude-sonnet-4-6` | `ANTHROPIC_API_KEY` or `LLM_API_KEY` |
 | Gemini | `gemini/gemini-3.1-pro-preview` | `GEMINI_API_KEY` or `LLM_API_KEY` |
-| MiniMax | `minimax/MiniMax-M2.1` | `MINIMAX_API_KEY` |
+| MiniMax | `minimax/MiniMax-M2.1` | `MINIMAX_API_KEY` + `MINIMAX_API_BASE` |
 | Ollama (local) | `ollama/llama3.2` | none (set `OLLAMA_API_BASE`) |
 
 ### Local Models via Ollama
@@ -224,7 +224,7 @@ OLLAMA_API_BASE=http://192.168.1.100:11434
 
 ### MiniMax
 
-[MiniMax](https://www.minimax.io) offers fast, low-cost models with OpenAI-compatible APIs.
+[MiniMax](https://www.minimax.io) offers fast, low-cost models via their Anthropic-compatible API.
 
 **1. Get an API key** from [api.minimax.io](https://api.minimax.io)
 
@@ -232,16 +232,17 @@ OLLAMA_API_BASE=http://192.168.1.100:11434
 
 ```bash
 MINIMAX_API_KEY=your_minimax_api_key
+MINIMAX_API_BASE=https://api.minimax.io/anthropic/v1/messages
 ```
 
 **3. Set the model in `.openkb/config.yaml`**
 
 ```yaml
 model: minimax/MiniMax-M2.1
-# model: minimax/MiniMax-M2.1-lightning
+# model: minimax/MiniMax-M2.5
 ```
 
-LiteLLM routes `minimax/` prefixed models to `https://api.minimax.io/v1` automatically.
+LiteLLM routes `minimax/` prefixed models through the Anthropic-compatible endpoint when `MINIMAX_API_BASE` is set.
 
 ### PageIndex Integration
 
