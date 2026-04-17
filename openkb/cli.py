@@ -65,7 +65,8 @@ def _setup_llm_key(kb_dir: Path | None = None) -> None:
         has_key = any(os.environ.get(k) for k in (
             "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
             "MINIMAX_API_KEY",
-            "OLLAMA_API_BASE",  # Ollama uses a base URL, not an API key
+            "OLLAMA_API_BASE",   # Ollama uses a base URL, not an API key
+            "ANTHROPIC_BASE_URL",  # MiniMax Anthropic-compatible endpoint
         ))
         if not has_key:
             click.echo(
