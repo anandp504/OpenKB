@@ -860,6 +860,39 @@ class TestCompileConceptsPlan:
         assert "sources: [summaries/test-doc.md]" in att_text
         assert "Attention" in att_text
 
+    @pytest.mark.asyncio
+    async def test_document_entry_added_to_index_in_happy_path(self, tmp_path):
+        """Normal flow: document entry [[summaries/doc]] appears in index.md under ## Documents."""
+        wiki = self._setup_wiki(tmp_path)
+        plan_response = json.dumps({
+            "create": [{"name": "attention", "title": "Attention"}],
+            "update": [],
+            "related": [],
+        })
+        concept_response = json.dumps({
+            "brief": "Self-attention mechanism",
+            "content": "# Attention\n\nContent.",
+        })
+
+        system_msg = {"role": "system", "content": "wiki agent"}
+        doc_msg = {"role": "user", "content": "doc content"}
+
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(
+                side_effect=_mock_acompletion([plan_response, concept_response])
+            )
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini", system_msg, doc_msg,
+                "summary text", "test-doc", 5,
+            )
+
+        index_text = (wiki / "index.md").read_text()
+        # Document entry must appear under ## Documents
+        docs_section = index_text.split("## Documents")[1].split("## Concepts")[0]
+        assert "[[summaries/test-doc]]" in docs_section
+        # Concept entry must also appear under ## Concepts
+        assert "[[concepts/attention]]" in index_text
+
 
 class TestBriefIntegration:
     @pytest.mark.asyncio
