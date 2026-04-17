@@ -1154,6 +1154,27 @@ class TestLLMReturnFormatRobustness:
         assert "[[summaries/test-doc]]" in (wiki / "index.md").read_text()
 
     @pytest.mark.asyncio
+    async def test_concepts_plan_llm_raises_index_still_updated(self, tmp_path):
+        """If the concepts-plan LLM call raises an exception, _update_index is still called.
+
+        Previously, an exception from _llm_call_async on the plan step propagated
+        uncaught out of _compile_concepts, so index.md was never updated.
+        After the fix, the exception is caught and index.md is updated with no concepts.
+        """
+        wiki = self._setup_wiki(tmp_path)
+        system_msg = {"role": "system", "content": "wiki agent"}
+        doc_msg = {"role": "user", "content": "doc content"}
+
+        with patch("openkb.agent.compiler.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(side_effect=Exception("API error"))
+            await _compile_concepts(
+                wiki, tmp_path, "gpt-4o-mini", system_msg, doc_msg,
+                "summary text", "test-doc", 5,
+            )
+
+        assert "[[summaries/test-doc]]" in (wiki / "index.md").read_text()
+
+    @pytest.mark.asyncio
     async def test_null_create_with_nonempty_update_index_still_updated(self, tmp_path):
         """Null create + non-empty update — the case that actually crashes.
 

@@ -618,14 +618,23 @@ async def _compile_concepts(
 
     sys.stdout.write("    concepts-plan...\n")
     sys.stdout.flush()
-    plan_raw = await _llm_call_async(model, [
-        system_msg,
-        doc_msg,
-        {"role": "assistant", "content": summary},
-        {"role": "user", "content": _CONCEPTS_PLAN_USER.format(
-            concept_briefs=concept_briefs,
-        )},
-    ], "concepts-plan")
+    try:
+        plan_raw = await _llm_call_async(model, [
+            system_msg,
+            doc_msg,
+            {"role": "assistant", "content": summary},
+            {"role": "user", "content": _CONCEPTS_PLAN_USER.format(
+                concept_briefs=concept_briefs,
+            )},
+        ], "concepts-plan")
+    except Exception as exc:
+        logger.warning("Concepts-plan LLM call failed: %s", exc)
+        if batch_state is not None:
+            async with batch_state.index_lock:
+                _update_index(wiki_dir, doc_name, [], doc_brief=doc_brief, doc_type=doc_type)
+        else:
+            _update_index(wiki_dir, doc_name, [], doc_brief=doc_brief, doc_type=doc_type)
+        return
 
     try:
         parsed = _parse_json(plan_raw)
