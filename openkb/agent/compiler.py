@@ -699,6 +699,10 @@ async def _compile_concepts(
             title = concept.get("title", name)
         concept_path = wiki_dir / "concepts" / f"{_sanitize_concept_name(name)}.md"
         # B.2 — skip update LLM call if source already in concept's frontmatter
+        # NOTE: this file read is not lock-protected. When batch_concurrency > 1
+        # and two docs both update the same concept concurrently, the second write
+        # will overwrite the first (last-writer-wins). Keep batch_concurrency=1
+        # (the default) if concept correctness is critical.
         if concept_path.exists():
             existing_raw = concept_path.read_text(encoding="utf-8")
             if source_file in existing_raw:
@@ -758,6 +762,7 @@ async def _compile_concepts(
                         _write_concept(wiki_dir, name, page_content, source_file, is_update, brief=brief)
                         if brief:
                             batch_state.update_concept_brief(safe_name, brief)
+                            concept_briefs_map[safe_name] = brief
                 else:
                     _write_concept(wiki_dir, name, page_content, source_file, is_update, brief=brief)
                     if brief:
