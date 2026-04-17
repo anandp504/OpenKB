@@ -193,12 +193,13 @@ pageindex_threshold: 20          # PDF pages threshold for PageIndex
 
 Model names use `provider/model` LiteLLM [format](https://docs.litellm.ai/docs/providers) (OpenAI models can omit the prefix):
 
-| Provider | Model example |
-|---|---|
-| OpenAI | `gpt-5.4` |
-| Anthropic | `anthropic/claude-sonnet-4-6` |
-| Gemini | `gemini/gemini-3.1-pro-preview` |
-| Ollama (local) | `ollama/llama3.2` |
+| Provider | Model example | API key env var |
+|---|---|---|
+| OpenAI | `gpt-5.4` | `OPENAI_API_KEY` or `LLM_API_KEY` |
+| Anthropic | `anthropic/claude-sonnet-4-6` | `ANTHROPIC_API_KEY` or `LLM_API_KEY` |
+| Gemini | `gemini/gemini-3.1-pro-preview` | `GEMINI_API_KEY` or `LLM_API_KEY` |
+| MiniMax | `minimax/MiniMax-M2.1` | `MINIMAX_API_KEY` |
+| Ollama (local) | `ollama/llama3.2` | none (set `OLLAMA_API_BASE`) |
 
 ### Local Models via Ollama
 
@@ -220,6 +221,27 @@ LiteLLM routes `ollama/` prefixed models through Ollama's OpenAI-compatible endp
 # .env
 OLLAMA_API_BASE=http://192.168.1.100:11434
 ```
+
+### MiniMax
+
+[MiniMax](https://www.minimax.io) offers fast, low-cost models with OpenAI-compatible APIs.
+
+**1. Get an API key** from [api.minimax.io](https://api.minimax.io)
+
+**2. Add to your `.env`**
+
+```bash
+MINIMAX_API_KEY=your_minimax_api_key
+```
+
+**3. Set the model in `.openkb/config.yaml`**
+
+```yaml
+model: minimax/MiniMax-M2.1
+# model: minimax/MiniMax-M2.1-lightning
+```
+
+LiteLLM routes `minimax/` prefixed models to `https://api.minimax.io/v1` automatically.
 
 ### PageIndex Integration
 
